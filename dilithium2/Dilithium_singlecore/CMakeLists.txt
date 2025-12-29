@@ -31,7 +31,7 @@ set(PICO_BOARD pico2_w CACHE STRING "Board type")
 
 include(pico_sdk_import.cmake)
 
-project(dilithiummulti C CXX ASM)
+project(dilithium_singlecore C CXX ASM)
 
 pico_sdk_init()
 
@@ -74,7 +74,7 @@ endif()
 # ------------------------------------------------------------------
 # Executable target
 # ------------------------------------------------------------------
-add_executable(dilithiummulti
+add_executable(dilithium_singlecore
     MainTest.c
     ${DILITHIUM_SOURCES}
     ${SYMMETRIC_SOURCES}
@@ -84,7 +84,7 @@ add_executable(dilithiummulti
 # ------------------------------------------------------------------
 # Target-specific compile options (CORRECT placement)
 # ------------------------------------------------------------------
-target_compile_options(dilithiummulti PRIVATE
+target_compile_options(dilithium_singlecore PRIVATE
     -Wall
     -Wextra
     -Wshadow
@@ -95,28 +95,28 @@ target_compile_options(dilithiummulti PRIVATE
 # ------------------------------------------------------------------
 # Compile-time definitions
 # ------------------------------------------------------------------
-target_compile_definitions(dilithiummulti PRIVATE
+target_compile_definitions(dilithium_singlecore PRIVATE
     DILITHIUM_MODE=${DILITHIUM_MODE}
 )
 
 if (DILITHIUM_USE_AES)
-    target_compile_definitions(dilithiummulti PRIVATE DILITHIUM_USE_AES)
+    target_compile_definitions(dilithium_singlecore PRIVATE DILITHIUM_USE_AES)
 endif()
 
 # ------------------------------------------------------------------
 # Pico libraries
 # ------------------------------------------------------------------
-target_link_libraries(dilithiummulti
+target_link_libraries(dilithium_singlecore
     pico_stdlib
     pico_time
     pico_rand
     pico_cyw43_arch_none
 )
 
-pico_enable_stdio_usb(dilithiummulti 1)
-pico_enable_stdio_uart(dilithiummulti 0)
+pico_enable_stdio_usb(dilithium_singlecore 1)
+pico_enable_stdio_uart(dilithium_singlecore 0)
 
 # ------------------------------------------------------------------
 # Outputs
 # ------------------------------------------------------------------
-pico_add_extra_outputs(dilithiummulti)
+pico_add_extra_outputs(dilithium_singlecore)
