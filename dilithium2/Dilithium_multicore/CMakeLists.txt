@@ -110,6 +110,7 @@ target_link_libraries(dilithium_multicore
     pico_stdlib
     pico_time
     pico_rand
+    pico_multicore
     pico_cyw43_arch_none
 )
 

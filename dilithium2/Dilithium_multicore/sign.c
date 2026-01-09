@@ -7,6 +7,33 @@
 #include "randombytes.h"
 #include "symmetric.h"
 #include "fips202.h"
+#include "pico/multicore.h"
+
+/*
+ * Data passed to core1 for Dilithium keypair sampling
+ */
+typedef struct {
+  polyvecl *s1;
+  polyveck *s2;
+  const uint8_t *rhoprime;
+} core1_sample_data_t;
+
+/*
+ * Core1 worker: sample s1 and s2
+ */
+void core1_sample_worker(void)
+{
+  // Wait for work from core0
+  core1_sample_data_t *data =
+      (core1_sample_data_t *)multicore_fifo_pop_blocking();
+
+  // Sample secret vectors
+  polyvecl_uniform_eta(data->s1, data->rhoprime, 0);
+  polyveck_uniform_eta(data->s2, data->rhoprime, L);
+
+  // Signal completion
+  multicore_fifo_push_blocking(1);
+}
 
 /*************************************************
 * Name:        crypto_sign_keypair
@@ -35,14 +62,23 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
   rhoprime = seedbuf + SEEDBYTES;
   key = seedbuf + 2*SEEDBYTES;
 
-  //<Multicore split 1>
-  /* Expand matrix */ 
-  polyvec_matrix_expand(mat, rho); //core1
+  // Launch core1 sampler
+  multicore_launch_core1(core1_sample_worker);
 
-  /* Sample short vectors s1 and s2 */
-  polyvecl_uniform_eta(&s1, rhoprime, 0);//core0
-  polyveck_uniform_eta(&s2, rhoprime, L);//core0
-  //</ Multicore split 1>
+  static volatile core1_sample_data_t sample_data;
+  sample_data.s1 = &s1;
+  sample_data.s2 = &s2;
+  sample_data.rhoprime = rhoprime;
+
+  // Send job to core1
+  multicore_fifo_push_blocking((uintptr_t)&sample_data);
+
+  // Core0 expands matrix in parallel
+  polyvec_matrix_expand(mat, rho);
+
+  // Wait for core1 to finish sampling
+  multicore_fifo_pop_blocking();
+  multicore_reset_core1();
 
 
   /* Matrix-vector multiplication */
