@@ -7,16 +7,6 @@
 #include "randombytes.h"
 #include "symmetric.h"
 #include "fips202.h"
-#include "pico/multicore.h"
-
-//seccurely zeroise static variables
-static void secure_zeroize(void *v, size_t n)
-{
-  volatile uint8_t *p = (volatile uint8_t *)v;
-  while (n--) {
-    *p++ = 0;
-  }
-}
 
 /*************************************************
 * Name:        crypto_sign_keypair
@@ -30,36 +20,9 @@ static void secure_zeroize(void *v, size_t n)
 *
 * Returns 0 (success)
 **************************************************/
-
-/*
- * Data passed to core1 for Dilithium keypair sampling
- */
-typedef struct {
-  polyvecl *s1;
-  polyveck *s2;
-  const uint8_t *rhoprime;
-} core1_sample_data_t;
-
-/*
- * Core1 worker: sample s1 and s2
- */
-void core1_sample_worker(void)
-{
-  // Wait for work from core0
-  core1_sample_data_t *data =
-      (core1_sample_data_t *)multicore_fifo_pop_blocking();
-
-  // Sample secret vectors
-  polyvecl_uniform_eta(data->s1, data->rhoprime, 0);
-  polyveck_uniform_eta(data->s2, data->rhoprime, L);
-
-  // Signal completion
-  multicore_fifo_push_blocking(1);
-}
-
 int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
-  uint8_t seedbuf[3*SEEDBYTES];
-  uint8_t tr[CRHBYTES];
+  uint8_t seedbuf[2*SEEDBYTES + CRHBYTES];
+  uint8_t tr[TRBYTES];
   const uint8_t *rho, *rhoprime, *key;
   polyvecl mat[K];
   polyvecl s1, s1hat;
@@ -67,31 +30,19 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
 
   /* Get randomness for rho, rhoprime and key */
   randombytes(seedbuf, SEEDBYTES);
-  shake256(seedbuf, 3*SEEDBYTES, seedbuf, SEEDBYTES);
+  seedbuf[SEEDBYTES+0] = K;
+  seedbuf[SEEDBYTES+1] = L;
+  shake256(seedbuf, 2*SEEDBYTES + CRHBYTES, seedbuf, SEEDBYTES+2);
   rho = seedbuf;
-  rhoprime = seedbuf + SEEDBYTES;
-  key = seedbuf + 2*SEEDBYTES;
+  rhoprime = rho + SEEDBYTES;
+  key = rhoprime + CRHBYTES;
 
-  // Launch core1 sampler
-  multicore_launch_core1(core1_sample_worker);
-
-  static volatile core1_sample_data_t sample_data;
-  sample_data.s1 = &s1;
-  sample_data.s2 = &s2;
-  sample_data.rhoprime = rhoprime;
-
-  // Send job to core1
-  multicore_fifo_push_blocking((uintptr_t)&sample_data);
-
-  // Core0 expands matrix in parallel
+  /* Expand matrix */
   polyvec_matrix_expand(mat, rho);
 
-  // Wait for core1 to finish sampling
-  multicore_fifo_pop_blocking();
-  multicore_reset_core1();
-
-  // Zeroise core1 work packet
-  // secure_zeroize((void *)&sample_data, sizeof(sample_data));
+  /* Sample short vectors s1 and s2 */
+  polyvecl_uniform_eta(&s1, rhoprime, 0);
+  polyveck_uniform_eta(&s2, rhoprime, L);
 
   /* Matrix-vector multiplication */
   s1hat = s1;
@@ -108,111 +59,83 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
   polyveck_power2round(&t1, &t0, &t1);
   pack_pk(pk, rho, &t1);
 
-  /* Compute CRH(rho, t1) and write secret key */
-  crh(tr, pk, CRYPTO_PUBLICKEYBYTES);
+  /* Compute H(rho, t1) and write secret key */
+  shake256(tr, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES);
   pack_sk(sk, rho, tr, key, &t0, &s1, &s2);
 
   return 0;
 }
 
 /*************************************************
-* Name:        crypto_sign_signature
+* Name:        crypto_sign_signature_internal
 *
-* Description: Computes signature.
+* Description: Computes signature. Internal API.
 *
 * Arguments:   - uint8_t *sig:   pointer to output signature (of length CRYPTO_BYTES)
 *              - size_t *siglen: pointer to output length of signature
 *              - uint8_t *m:     pointer to message to be signed
 *              - size_t mlen:    length of message
+*              - uint8_t *pre:   pointer to prefix string
+*              - size_t prelen:  length of prefix string
+*              - uint8_t *rnd:   pointer to random seed
 *              - uint8_t *sk:    pointer to bit-packed secret key
 *
 * Returns 0 (success)
 **************************************************/
-
-typedef struct {
-    polyvecl *mat;        // points to mat[K]
-    const uint8_t *rho;   // seed for matrix expansion
-} core1_mat_expand_args_t;
-
-
-void core1_mat_expand(void) {
-  core1_mat_expand_args_t *a = (core1_mat_expand_args_t *)multicore_fifo_pop_blocking();
-
-  polyvec_matrix_expand(a->mat, a->rho);
-
-  // Signal completion
-  multicore_fifo_push_blocking(1);
-
-  while (1) {
-    tight_loop_contents();
-  }
-
-}
-
-int crypto_sign_signature(uint8_t *sig,
-                          size_t *siglen,
-                          const uint8_t *m,
-                          size_t mlen,
-                          const uint8_t *sk)
+int crypto_sign_signature_internal(uint8_t *sig,
+                                   size_t *siglen,
+                                   const uint8_t *m,
+                                   size_t mlen,
+                                   const uint8_t *pre,
+                                   size_t prelen,
+                                   const uint8_t rnd[RNDBYTES],
+                                   const uint8_t *sk)
 {
   unsigned int n;
-  uint8_t seedbuf[2*SEEDBYTES + 3*CRHBYTES];
+  uint8_t seedbuf[2*SEEDBYTES + TRBYTES + 2*CRHBYTES];
   uint8_t *rho, *tr, *key, *mu, *rhoprime;
   uint16_t nonce = 0;
-  static polyvecl mat[K], s1;
-  polyvecl y, z;
-  static polyveck t0, s2;
-  polyveck w1, w0, h;
+  polyvecl mat[K], s1, y, z;
+  polyveck t0, s2, w1, w0, h;
   poly cp;
   keccak_state state;
 
   rho = seedbuf;
   tr = rho + SEEDBYTES;
-  key = tr + CRHBYTES;
+  key = tr + TRBYTES;
   mu = key + SEEDBYTES;
   rhoprime = mu + CRHBYTES;
   unpack_sk(rho, tr, key, &t0, &s1, &s2, sk);
 
-  /* Compute CRH(tr, msg) */
+  /* Compute mu = CRH(tr, pre, msg) */
   shake256_init(&state);
-  shake256_absorb(&state, tr, CRHBYTES);
+  shake256_absorb(&state, tr, TRBYTES);
+  shake256_absorb(&state, pre, prelen);
   shake256_absorb(&state, m, mlen);
   shake256_finalize(&state);
   shake256_squeeze(mu, CRHBYTES, &state);
 
-#ifdef DILITHIUM_RANDOMIZED_SIGNING
-  randombytes(rhoprime, CRHBYTES);
-#else
-  crh(rhoprime, key, SEEDBYTES + CRHBYTES);
-#endif
+  /* Compute rhoprime = CRH(key, rnd, mu) */
+  shake256_init(&state);
+  shake256_absorb(&state, key, SEEDBYTES);
+  shake256_absorb(&state, rnd, RNDBYTES);
+  shake256_absorb(&state, mu, CRHBYTES);
+  shake256_finalize(&state);
+  shake256_squeeze(rhoprime, CRHBYTES, &state);
 
-/* Expand matrix and transform vectors */
-
-
-  multicore_launch_core1(core1_mat_expand);
-  
-  static core1_mat_expand_args_t core1_args;
-  core1_args.mat = mat;
-  core1_args.rho = rho;
-
-  multicore_fifo_push_blocking((uintptr_t)&core1_args);
-
+  /* Expand matrix and transform vectors */
+  polyvec_matrix_expand(mat, rho);
   polyvecl_ntt(&s1);
-  polyveck_ntt(&s2); 
+  polyveck_ntt(&s2);
   polyveck_ntt(&t0);
-
-  /* --- sync point --- */
-  multicore_fifo_pop_blocking();
-  multicore_reset_core1();
-
 
 rej:
   /* Sample intermediate vector y */
   polyvecl_uniform_gamma1(&y, rhoprime, nonce++);
-  z = y;
-  polyvecl_ntt(&z);
 
   /* Matrix-vector multiplication */
+  z = y;
+  polyvecl_ntt(&z);
   polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
   polyveck_reduce(&w1);
   polyveck_invntt_tomont(&w1);
@@ -226,7 +149,7 @@ rej:
   shake256_absorb(&state, mu, CRHBYTES);
   shake256_absorb(&state, sig, K*POLYW1_PACKEDBYTES);
   shake256_finalize(&state);
-  shake256_squeeze(sig, SEEDBYTES, &state);
+  shake256_squeeze(sig, CTILDEBYTES, &state);
   poly_challenge(&cp, sig);
   poly_ntt(&cp);
 
@@ -255,7 +178,6 @@ rej:
     goto rej;
 
   polyveck_add(&w0, &w0, &h);
-  polyveck_caddq(&w0);
   n = polyveck_make_hint(&h, &w0, &w1);
   if(n > OMEGA)
     goto rej;
@@ -263,6 +185,53 @@ rej:
   /* Write signature */
   pack_sig(sig, sig, &z, &h);
   *siglen = CRYPTO_BYTES;
+  return 0;
+}
+
+/*************************************************
+* Name:        crypto_sign_signature
+*
+* Description: Computes signature.
+*
+* Arguments:   - uint8_t *sig:   pointer to output signature (of length CRYPTO_BYTES)
+*              - size_t *siglen: pointer to output length of signature
+*              - uint8_t *m:     pointer to message to be signed
+*              - size_t mlen:    length of message
+*              - uint8_t *ctx:   pointer to contex string
+*              - size_t ctxlen:  length of contex string
+*              - uint8_t *sk:    pointer to bit-packed secret key
+*
+* Returns 0 (success) or -1 (context string too long)
+**************************************************/
+int crypto_sign_signature(uint8_t *sig,
+                          size_t *siglen,
+                          const uint8_t *m,
+                          size_t mlen,
+                          const uint8_t *ctx,
+                          size_t ctxlen,
+                          const uint8_t *sk)
+{
+  size_t i;
+  uint8_t pre[257];
+  uint8_t rnd[RNDBYTES];
+
+  if(ctxlen > 255)
+    return -1;
+
+  /* Prepare pre = (0, ctxlen, ctx) */
+  pre[0] = 0;
+  pre[1] = ctxlen;
+  for(i = 0; i < ctxlen; i++)
+    pre[2 + i] = ctx[i];
+
+#ifdef DILITHIUM_RANDOMIZED_SIGNING
+  randombytes(rnd, RNDBYTES);
+#else
+  for(i=0;i<RNDBYTES;i++)
+    rnd[i] = 0;
+#endif
+
+  crypto_sign_signature_internal(sig,siglen,m,mlen,pre,2+ctxlen,rnd,sk);
   return 0;
 }
 
@@ -278,50 +247,59 @@ rej:
 *                               message
 *              - const uint8_t *m: pointer to message to be signed
 *              - size_t mlen: length of message
+*              - const uint8_t *ctx: pointer to context string
+*              - size_t ctxlen: length of context string
 *              - const uint8_t *sk: pointer to bit-packed secret key
 *
-* Returns 0 (success)
+* Returns 0 (success) or -1 (context string too long)
 **************************************************/
 int crypto_sign(uint8_t *sm,
                 size_t *smlen,
                 const uint8_t *m,
                 size_t mlen,
+                const uint8_t *ctx,
+                size_t ctxlen,
                 const uint8_t *sk)
 {
+  int ret;
   size_t i;
 
   for(i = 0; i < mlen; ++i)
     sm[CRYPTO_BYTES + mlen - 1 - i] = m[mlen - 1 - i];
-  crypto_sign_signature(sm, smlen, sm + CRYPTO_BYTES, mlen, sk);
+  ret = crypto_sign_signature(sm, smlen, sm + CRYPTO_BYTES, mlen, ctx, ctxlen, sk);
   *smlen += mlen;
-  return 0;
+  return ret;
 }
 
 /*************************************************
-* Name:        crypto_sign_verify
+* Name:        crypto_sign_verify_internal
 *
-* Description: Verifies signature.
+* Description: Verifies signature. Internal API.
 *
 * Arguments:   - uint8_t *m: pointer to input signature
 *              - size_t siglen: length of signature
 *              - const uint8_t *m: pointer to message
 *              - size_t mlen: length of message
+*              - const uint8_t *pre: pointer to prefix string
+*              - size_t prelen: length of prefix string
 *              - const uint8_t *pk: pointer to bit-packed public key
 *
 * Returns 0 if signature could be verified correctly and -1 otherwise
 **************************************************/
-int crypto_sign_verify(const uint8_t *sig,
-                       size_t siglen,
-                       const uint8_t *m,
-                       size_t mlen,
-                       const uint8_t *pk)
+int crypto_sign_verify_internal(const uint8_t *sig,
+                                size_t siglen,
+                                const uint8_t *m,
+                                size_t mlen,
+                                const uint8_t *pre,
+                                size_t prelen,
+                                const uint8_t *pk)
 {
   unsigned int i;
   uint8_t buf[K*POLYW1_PACKEDBYTES];
   uint8_t rho[SEEDBYTES];
   uint8_t mu[CRHBYTES];
-  uint8_t c[SEEDBYTES];
-  uint8_t c2[SEEDBYTES];
+  uint8_t c[CTILDEBYTES];
+  uint8_t c2[CTILDEBYTES];
   poly cp;
   polyvecl mat[K], z;
   polyveck t1, w1, h;
@@ -330,40 +308,32 @@ int crypto_sign_verify(const uint8_t *sig,
   if(siglen != CRYPTO_BYTES)
     return -1;
 
-  //<multicore split 4>
-  unpack_pk(rho, &t1, pk);//core1
-  if(unpack_sig(c, &z, &h, sig))//core0
+  unpack_pk(rho, &t1, pk);
+  if(unpack_sig(c, &z, &h, sig))
     return -1;
-  if(polyvecl_chknorm(&z, GAMMA1 - BETA))//core0
+  if(polyvecl_chknorm(&z, GAMMA1 - BETA))
     return -1;
-  //</ multicore split 4>
-  
 
-  //<multicore split 5>
-  /* Compute CRH(CRH(rho, t1), msg) */
-  crh(mu, pk, CRYPTO_PUBLICKEYBYTES);
+  /* Compute CRH(H(rho, t1), pre, msg) */
+  shake256(mu, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES);
   shake256_init(&state);
-  shake256_absorb(&state, mu, CRHBYTES);
+  shake256_absorb(&state, mu, TRBYTES);
+  shake256_absorb(&state, pre, prelen);
   shake256_absorb(&state, m, mlen);
   shake256_finalize(&state);
   shake256_squeeze(mu, CRHBYTES, &state);
 
   /* Matrix-vector multiplication; compute Az - c2^dt1 */
-  poly_challenge(&cp, c);//core1
-  polyvec_matrix_expand(mat, rho);//core1
-  //</ multicore split 5>
+  poly_challenge(&cp, c);
+  polyvec_matrix_expand(mat, rho);
 
+  polyvecl_ntt(&z);
+  polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
 
-  //<multicore split 6>
-  polyvecl_ntt(&z);//core1
-  polyvec_matrix_pointwise_montgomery(&w1, mat, &z);//core1
-
-  poly_ntt(&cp);//core0
+  poly_ntt(&cp);
   polyveck_shiftl(&t1);
   polyveck_ntt(&t1);
   polyveck_pointwise_poly_montgomery(&t1, &cp, &t1);
-  //</ multicore split 6>
-
 
   polyveck_sub(&w1, &w1, &t1);
   polyveck_reduce(&w1);
@@ -379,12 +349,49 @@ int crypto_sign_verify(const uint8_t *sig,
   shake256_absorb(&state, mu, CRHBYTES);
   shake256_absorb(&state, buf, K*POLYW1_PACKEDBYTES);
   shake256_finalize(&state);
-  shake256_squeeze(c2, SEEDBYTES, &state);
-  for(i = 0; i < SEEDBYTES; ++i)
+  shake256_squeeze(c2, CTILDEBYTES, &state);
+  for(i = 0; i < CTILDEBYTES; ++i)
     if(c[i] != c2[i])
       return -1;
 
   return 0;
+}
+
+/*************************************************
+* Name:        crypto_sign_verify
+*
+* Description: Verifies signature.
+*
+* Arguments:   - uint8_t *m: pointer to input signature
+*              - size_t siglen: length of signature
+*              - const uint8_t *m: pointer to message
+*              - size_t mlen: length of message
+*              - const uint8_t *ctx: pointer to context string
+*              - size_t ctxlen: length of context string
+*              - const uint8_t *pk: pointer to bit-packed public key
+*
+* Returns 0 if signature could be verified correctly and -1 otherwise
+**************************************************/
+int crypto_sign_verify(const uint8_t *sig,
+                       size_t siglen,
+                       const uint8_t *m,
+                       size_t mlen,
+                       const uint8_t *ctx,
+                       size_t ctxlen,
+                       const uint8_t *pk)
+{
+  size_t i;
+  uint8_t pre[257];
+
+  if(ctxlen > 255)
+    return -1;
+
+  pre[0] = 0;
+  pre[1] = ctxlen;
+  for(i = 0; i < ctxlen; i++)
+    pre[2 + i] = ctx[i];
+
+  return crypto_sign_verify_internal(sig,siglen,m,mlen,pre,2+ctxlen,pk);
 }
 
 /*************************************************
@@ -397,6 +404,8 @@ int crypto_sign_verify(const uint8_t *sig,
 *              - size_t *mlen: pointer to output length of message
 *              - const uint8_t *sm: pointer to signed message
 *              - size_t smlen: length of signed message
+*              - const uint8_t *ctx: pointer to context tring
+*              - size_t ctxlen: length of context string
 *              - const uint8_t *pk: pointer to bit-packed public key
 *
 * Returns 0 if signed message could be verified correctly and -1 otherwise
@@ -405,6 +414,8 @@ int crypto_sign_open(uint8_t *m,
                      size_t *mlen,
                      const uint8_t *sm,
                      size_t smlen,
+                     const uint8_t *ctx,
+                     size_t ctxlen,
                      const uint8_t *pk)
 {
   size_t i;
@@ -413,11 +424,10 @@ int crypto_sign_open(uint8_t *m,
     goto badsig;
 
   *mlen = smlen - CRYPTO_BYTES;
-  if(crypto_sign_verify(sm, CRYPTO_BYTES, sm + CRYPTO_BYTES, *mlen, pk))
+  if(crypto_sign_verify(sm, CRYPTO_BYTES, sm + CRYPTO_BYTES, *mlen, ctx, ctxlen, pk))
     goto badsig;
   else {
     /* All good, copy msg, return 0 */
-    //possibly split???
     for(i = 0; i < *mlen; ++i)
       m[i] = sm[CRYPTO_BYTES + i];
     return 0;
@@ -425,8 +435,7 @@ int crypto_sign_open(uint8_t *m,
 
 badsig:
   /* Signature verification failed */
-  *mlen = -1;
-  //possibly split ???
+  *mlen = 0;
   for(i = 0; i < smlen; ++i)
     m[i] = 0;
 
