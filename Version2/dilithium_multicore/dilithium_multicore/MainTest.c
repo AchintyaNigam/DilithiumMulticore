@@ -71,6 +71,7 @@ static int test_sign(void)
         if (ret)
         {
             printf("ERROR verification failed");
+            printf(" NTEST = %d", i);
             return 1;
         }
 
