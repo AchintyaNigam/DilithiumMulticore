@@ -12,7 +12,7 @@
 #include "pico/time.h"
 #include "pico/cyw43_arch.h"
 
-#define MLEN    59
+#define MLEN    1024
 #define CTXLEN  14
 #define NTESTS  100
 
@@ -169,22 +169,22 @@ int main(void)
     ms = to_ms_since_boot(get_absolute_time());
     printf("final   = %" PRIu64 " us (%u ms)\n", us, ms);
 
-    pico_set_led(false);
-
+    
     /* Report sizes */
     printf("CRYPTO_PUBLICKEYBYTES = %d\n", CRYPTO_PUBLICKEYBYTES);
     printf("CRYPTO_SECRETKEYBYTES = %d\n", CRYPTO_SECRETKEYBYTES);
     printf("CRYPTO_BYTES          = %d\n", CRYPTO_BYTES);
-
-    /* Report totals and averages */
+    
     printf("NTESTS: %u\n", NTESTS);
+    /* Report totals and averages */
     printf("Total keygen us:  %" PRIu64 "\n", sum_keygen);
     printf("Total sign us:    %" PRIu64 "\n", sum_sign);
     printf("Total verify us:  %" PRIu64 "\n", sum_verify);
-
+    
     printf("Avg keygen us:    %" PRIu64 "\n", sum_keygen / NTESTS);
     printf("Avg sign us:      %" PRIu64 "\n", sum_sign / NTESTS);
     printf("Avg verify us:    %" PRIu64 "\n", sum_verify / NTESTS);
-
+    
+    pico_set_led(false);
     return 0;
 }
