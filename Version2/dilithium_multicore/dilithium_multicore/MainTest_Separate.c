@@ -12,9 +12,11 @@
 #include "pico/time.h"
 #include "pico/cyw43_arch.h"
 
-#define MLEN    59
-#define CTXLEN  14
-#define NTESTS  100
+#define SECURITY_LEVEL 5 // only for output format does not actually change the level. If you want to change the level change it in config.h
+static const size_t MLEN_LIST[] = {16, 32, 59, 128, 512, 1024};
+#define MLEN_COUNT (sizeof(MLEN_LIST) / sizeof(MLEN_LIST[0]))
+#define CTXLEN 14
+#define NTESTS 1000
 
 /* -------------------------------------------------------------
  * LED helpers
@@ -42,9 +44,11 @@ int pico_led_init(void)
 /* -------------------------------------------------------------
  * Timed sign + verify test
  * ------------------------------------------------------------- */
-static int test_sign_timed(uint64_t *d_keygen,
+static int test_sign_timed(size_t MLEN,
+                           uint64_t *d_keygen,
                            uint64_t *d_sign,
                            uint64_t *d_verify)
+
 {
     uint8_t pk[CRYPTO_PUBLICKEYBYTES];
     uint8_t sk[CRYPTO_SECRETKEYBYTES];
@@ -80,12 +84,14 @@ static int test_sign_timed(uint64_t *d_keygen,
     t1 = time_us_64();
     *d_verify = t1 - t0;
 
-    if (ret) {
+    if (ret)
+    {
         printf("ERROR verification failed\n");
         return 1;
     }
 
-    if (mlen != MLEN || memcmp(m, m2, MLEN)) {
+    if (mlen != MLEN || memcmp(m, m2, MLEN))
+    {
         printf("ERROR message mismatch\n");
         return 1;
     }
@@ -96,34 +102,39 @@ static int test_sign_timed(uint64_t *d_keygen,
 /* -------------------------------------------------------------
  * Negative test: trivial forgery
  * ------------------------------------------------------------- */
-static int test_forgery(void)
+static int test_forgery(size_t mlen)
 {
     uint8_t pk[CRYPTO_PUBLICKEYBYTES];
     uint8_t sk[CRYPTO_SECRETKEYBYTES];
 
-    uint8_t m[MLEN + CRYPTO_BYTES];
-    uint8_t m2[MLEN + CRYPTO_BYTES];
-    uint8_t sm[MLEN + CRYPTO_BYTES];
+    /* allocate for worst case */
+    uint8_t m[1024 + CRYPTO_BYTES];
+    uint8_t m2[1024 + CRYPTO_BYTES];
+    uint8_t sm[1024 + CRYPTO_BYTES];
 
-    size_t smlen, mlen;
+    size_t smlen, outlen;
 
     uint8_t ctx[CTXLEN] = {0};
     uint8_t b;
     size_t pos;
 
-    snprintf((char *)ctx, CTXLEN, "mainTest");
+    memcpy(ctx, "PicoBench", 9);
 
-    randombytes(m, MLEN);
+    randombytes(m, mlen);
     crypto_sign_keypair(pk, sk);
-    crypto_sign(sm, &smlen, m, MLEN, ctx, CTXLEN, sk);
+    crypto_sign(sm, &smlen, m, mlen, ctx, CTXLEN, sk);
 
-    do { randombytes(&b, 1); } while (!b);
+    /* flip one random nonzero bit */
+    do
+    {
+        randombytes(&b, 1);
+    } while (!b);
     randombytes((uint8_t *)&pos, sizeof(size_t));
+    sm[pos % smlen] ^= b;
 
-    sm[pos % (MLEN + CRYPTO_BYTES)] ^= b;
-
-    if (!crypto_sign_open(m2, &mlen, sm, smlen, ctx, CTXLEN, pk)) {
-        printf("ERROR trivial forgery accepted\n");
+    if (!crypto_sign_open(m2, &outlen, sm, smlen, ctx, CTXLEN, pk))
+    {
+        fprintf(stderr, "FORGERY ACCEPTED (mlen=%d)\n", (int)mlen);
         return 1;
     }
 
@@ -147,44 +158,50 @@ int main(void)
 
     pico_set_led(true);
 
-    uint64_t sum_keygen = 0;
-    uint64_t sum_sign   = 0;
-    uint64_t sum_verify = 0;
+    printf("SecurityLevel,NTEST,MLEN,AvgKeygen_us,AvgSign_us,AvgVerify_us\n");
 
-    for (unsigned int i = 0; i < NTESTS; i++) {
-        uint64_t dkg = 0, dsg = 0, dvf = 0;
-        if (test_sign_timed(&dkg, &dsg, &dvf))
+    for (size_t m = 0; m < MLEN_COUNT; m++)
+    {
+
+        size_t mlen = MLEN_LIST[m];
+
+        /* Negative test (not timed) */
+        if (test_forgery(mlen))
             return 1;
 
-        sum_keygen += dkg;
-        sum_sign   += dsg;
-        sum_verify += dvf;
-    }
+        uint64_t sum_keygen = 0;
+        uint64_t sum_sign = 0;
+        uint64_t sum_verify = 0;
 
-    /* Negative test (not timed) */
-    if (test_forgery())
-        return 1;
+        for (unsigned int i = 0; i < NTESTS; i++)
+        {
+            uint64_t dkg, dsg, dvf;
+            if (test_sign_timed(mlen, &dkg, &dsg, &dvf))
+                return 1;
+
+            sum_keygen += dkg;
+            sum_sign += dsg;
+            sum_verify += dvf;
+        }
+
+        printf("%d,%d,%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+               SECURITY_LEVEL,
+               NTESTS,
+               (int)mlen,
+               sum_keygen / NTESTS,
+               sum_sign / NTESTS,
+               sum_verify / NTESTS);
+    }
 
     us = time_us_64();
     ms = to_ms_since_boot(get_absolute_time());
     printf("final   = %" PRIu64 " us (%u ms)\n", us, ms);
-
-    pico_set_led(false);
 
     /* Report sizes */
     printf("CRYPTO_PUBLICKEYBYTES = %d\n", CRYPTO_PUBLICKEYBYTES);
     printf("CRYPTO_SECRETKEYBYTES = %d\n", CRYPTO_SECRETKEYBYTES);
     printf("CRYPTO_BYTES          = %d\n", CRYPTO_BYTES);
 
-    /* Report totals and averages */
-    printf("NTESTS: %u\n", NTESTS);
-    printf("Total keygen us:  %" PRIu64 "\n", sum_keygen);
-    printf("Total sign us:    %" PRIu64 "\n", sum_sign);
-    printf("Total verify us:  %" PRIu64 "\n", sum_verify);
-
-    printf("Avg keygen us:    %" PRIu64 "\n", sum_keygen / NTESTS);
-    printf("Avg sign us:      %" PRIu64 "\n", sum_sign / NTESTS);
-    printf("Avg verify us:    %" PRIu64 "\n", sum_verify / NTESTS);
-
+    pico_set_led(false);
     return 0;
 }
