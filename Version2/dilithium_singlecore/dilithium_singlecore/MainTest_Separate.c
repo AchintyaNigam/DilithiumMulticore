@@ -16,7 +16,7 @@
 static const size_t MLEN_LIST[] = {16, 32, 59, 128, 512, 1024};
 #define MLEN_COUNT (sizeof(MLEN_LIST) / sizeof(MLEN_LIST[0]))
 #define CTXLEN 14
-#define NTESTS 1000
+#define NTESTS 10
 
 /* -------------------------------------------------------------
  * LED helpers

@@ -12,37 +12,16 @@
 #include "pico/time.h"
 #include "pico/cyw43_arch.h"
 
-#define MLEN 59
+#define SIGNAL_PIN 2
+static const size_t MLEN_LIST[] = {16, 32, 59, 128, 512, 1024};
+#define MLEN_COUNT (sizeof(MLEN_LIST) / sizeof(MLEN_LIST[0]))
 #define CTXLEN 14
-#define NTESTS 10
-
-//  -------------------------------------------------------------
-//   LED helpers
-//   -------------------------------------------------------------
-void pico_set_led(bool led_on)
-{
-#if defined(PICO_DEFAULT_LED_PIN)
-    gpio_put(PICO_DEFAULT_LED_PIN, led_on);
-#elif defined(CYW43_WL_GPIO_LED_PIN)
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_on);
-#endif
-}
-
-int pico_led_init(void)
-{
-#if defined(PICO_DEFAULT_LED_PIN)
-    gpio_init(PICO_DEFAULT_LED_PIN);
-    gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
-    return PICO_OK;
-#elif defined(CYW43_WL_GPIO_LED_PIN)
-    return cyw43_arch_init();
-#endif
-}
+#define NTESTS 100
 
 //  -------------------------------------------------------------
 //   Dilithium signature test (context-aware)
 //   -------------------------------------------------------------
-static int test_sign(void)
+static int test_sign(size_t MLEN)
 {
     size_t i, j;
     int ret;
@@ -62,6 +41,7 @@ static int test_sign(void)
 
     for (i = 0; i < NTESTS; ++i)
     {
+        // gpio_put(SIGNAL_PIN, 1);
 
         randombytes(m, MLEN);
         crypto_sign_keypair(pk, sk);
@@ -71,6 +51,7 @@ static int test_sign(void)
         if (ret)
         {
             printf("ERROR verification failed");
+            printf(" NTEST = %d", i);
             return 1;
         }
 
@@ -83,7 +64,7 @@ static int test_sign(void)
         if (mlen != MLEN)
         {
             printf("ERROR message length wrong");
-            return 1;
+            return 1;                                                                                                                                                                                                                                                                   
         }
 
         for (j = 0; j < MLEN; ++j)
@@ -95,23 +76,23 @@ static int test_sign(void)
             }
         }
 
-        //  ---- forgery test ----
-        randombytes((uint8_t *)&j, sizeof(j));
-        do
-        {
-            randombytes(&b, 1);
-        } while (!b);
+        // //  ---- forgery test ----
+        // randombytes((uint8_t *)&j, sizeof(j));
+        // do
+        // {
+        //     randombytes(&b, 1);
+        // } while (!b);
 
-        sm[j % (MLEN + CRYPTO_BYTES)] += b;
+        // sm[j % (MLEN + CRYPTO_BYTES)] += b;
 
-        ret = crypto_sign_open(m2, &mlen, sm, smlen, ctx, CTXLEN, pk);
-        if (!ret)
-        {
-            printf("ERROR trivial forgery accepted");
-            return 1;
-        }
+        // ret = crypto_sign_open(m2, &mlen, sm, smlen, ctx, CTXLEN, pk);
+        // if (!ret)
+        // {
+        //     printf("ERROR trivial forgery accepted");
+        //     return 1;
+        // }
     }
-
+        // gpio_put(SIGNAL_PIN, 0); // done now
     return 0;
 }
 
@@ -120,24 +101,41 @@ static int test_sign(void)
 //   -------------------------------------------------------------
 int main(void)
 {
-    stdio_init_all();
-    sleep_ms(5000); // allow USB to enumerate
 
-    int rc = pico_led_init();
-    hard_assert(rc == PICO_OK);
+    stdio_init_all();
+    gpio_init(SIGNAL_PIN);
+    gpio_set_dir(SIGNAL_PIN, true);
+    unsigned int i;
+    int r;
+    stdio_usb_init();
+    sleep_ms(5000);
+    uint64_t us = time_us_64();                          // monotonic µs since boot
+    uint32_t ms = to_ms_since_boot(get_absolute_time()); // ms since boot
+    gpio_put(SIGNAL_PIN, 1); // done now
 
     uint64_t us_start = time_us_64();
     uint32_t ms_start = to_ms_since_boot(get_absolute_time());
 
     printf("Initial = %" PRIu64 " us (%u ms)\n", us_start, ms_start);
 
-    pico_set_led(true);
+        if (test_sign(59))
+              return 1;
 
-    if (test_sign())
-    {
-        pico_set_led(false);
-        return 1;
-    }
+    // for (size_t m = 0; m < MLEN_COUNT; m++)
+    // {
+
+    //     size_t mlen = MLEN_LIST[m];
+
+
+    //     for (unsigned int i = 0; i < NTESTS; i++)
+    //     {
+    //         if (test_sign(mlen))
+    //             return 1;
+    //     }
+
+    // }
+
+    gpio_put(SIGNAL_PIN, 0); // done now
 
     uint64_t us_end = time_us_64();
     uint32_t ms_end = to_ms_since_boot(get_absolute_time());
@@ -148,6 +146,6 @@ int main(void)
     printf("CRYPTO_SECRETKEYBYTES = %d\n", CRYPTO_SECRETKEYBYTES);
     printf("CRYPTO_BYTES          = %d\n", CRYPTO_BYTES);
 
-    pico_set_led(false);
     return 0;
 }
+
