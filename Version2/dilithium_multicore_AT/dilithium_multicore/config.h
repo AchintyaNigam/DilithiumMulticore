@@ -1,7 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#define DILITHIUM_MODE 5 //change this to change security level
+#define DILITHIUM_MODE 5
 #define DILITHIUM_RANDOMIZED_SIGNING
 //#define USE_RDPMC
 //#define DBENCH
