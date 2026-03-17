@@ -8,11 +8,7 @@
 #include "symmetric.h"
 #include "fips202.h"
 #include "pico/multicore.h"
-#include "profile.h"
-#include "pico/time.h"
-
- uint64_t T0, T1;
-
+#include "mem_profile.h"
 
 //seccurely zeroise static variables
 static void secure_zeroize(void *v, size_t n)
@@ -55,12 +51,10 @@ void core1_sample_worker(void)
   core1_sample_data_t *data =
       (core1_sample_data_t *)multicore_fifo_pop_blocking();
 
-  T0 = time_us_64();
   // Sample secret vectors
   polyvecl_uniform_eta(data->s1, data->rhoprime, 0);
   polyveck_uniform_eta(data->s2, data->rhoprime, L);
-  T1 = time_us_64();
-  kg_prof.noise_eta += (T1-T0);
+  check_stack_usage_core1();
 
   // Signal completion
   multicore_fifo_push_blocking(1);
@@ -82,7 +76,7 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
   rho = seedbuf;
   rhoprime = rho + SEEDBYTES;
   key = rhoprime + CRHBYTES;
-
+  check_stack_usage_core0();
   // Launch core1 sampler
   multicore_launch_core1(core1_sample_worker);
 
@@ -94,33 +88,25 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
   // Send job to core1
   multicore_fifo_push_blocking((uintptr_t)&sample_data);
 
-  T0 = time_us_64();
   // Core0 expands matrix in parallel
   polyvec_matrix_expand(mat, rho);
-  T1 = time_us_64();
-  kg_prof.matrix_expand += (T1-T0);
+  check_stack_usage_core0();
+
   // Wait for core1 to finish sampling
   multicore_fifo_pop_blocking();
   multicore_reset_core1();
+  check_stack_usage_core0();
 
   // Zeroise core1 work packet
   secure_zeroize((void *)&sample_data, sizeof(sample_data));
 
   /* Matrix-vector multiplication */
   s1hat = s1;
-  T0 = time_us_64();
   polyvecl_ntt(&s1hat);
-  T1 = time_us_64();
-  kg_prof.ntt += (T1-T0);
-  T0 = time_us_64();
   polyvec_matrix_pointwise_montgomery(&t1, mat, &s1hat);
-  T1 = time_us_64();
-  kg_prof.matmul += (T1-T0);
   polyveck_reduce(&t1);
-  T0 = time_us_64();
   polyveck_invntt_tomont(&t1);
-  T1 = time_us_64();
-  kg_prof.invntt += (T1-T0);
+  check_stack_usage_core0();
 
   /* Add error vector s2 */
   polyveck_add(&t1, &t1, &s2);
@@ -128,17 +114,13 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
   /* Extract t1 and write public key */
   polyveck_caddq(&t1);
   polyveck_power2round(&t1, &t0, &t1);
-  T0 = time_us_64();
   pack_pk(pk, rho, &t1);
-  T1 = time_us_64();
-  kg_prof.pack_pk += (T1-T0);
+  check_stack_usage_core0();
 
   /* Compute H(rho, t1) and write secret key */
   shake256(tr, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES);
-  T0 = time_us_64();
   pack_sk(sk, rho, tr, key, &t0, &s1, &s2);
-  T1 = time_us_64();
-  kg_prof.pack_sk += (T1-T0);
+  check_stack_usage_core0();
 
   return 0;
 }
@@ -170,12 +152,10 @@ void core1_sign_init_worker(void)
   core1_sign_init_data_t *data =
       (core1_sign_init_data_t *)multicore_fifo_pop_blocking();
 
-  T0 = time_us_64();
   polyvecl_ntt(data->s1);
   polyveck_ntt(data->s2);
   polyveck_ntt(data->t0);
-  T1 = time_us_64();
-  sign_prof.ntt_secrets += (T1-T0);
+  check_stack_usage_core1();
 
   multicore_fifo_push_blocking(1);
 }
@@ -204,6 +184,7 @@ int crypto_sign_signature_internal(uint8_t *sig,
   mu = key + SEEDBYTES;
   rhoprime = mu + CRHBYTES;
   unpack_sk(rho, tr, key, &t0, &s1, &s2, sk);
+  check_stack_usage_core0();
 
   /* Compute mu = CRH(tr, pre, msg) */
   shake256_init(&state);
@@ -212,6 +193,7 @@ int crypto_sign_signature_internal(uint8_t *sig,
   shake256_absorb(&state, m, mlen);
   shake256_finalize(&state);
   shake256_squeeze(mu, CRHBYTES, &state);
+  check_stack_usage_core0();
 
   /* Compute rhoprime = CRH(key, rnd, mu) */
   shake256_init(&state);
@@ -220,6 +202,7 @@ int crypto_sign_signature_internal(uint8_t *sig,
   shake256_absorb(&state, mu, CRHBYTES);
   shake256_finalize(&state);
   shake256_squeeze(rhoprime, CRHBYTES, &state);
+  check_stack_usage_core0();
 
 /* Launch core1 worker */
 multicore_launch_core1(core1_sign_init_worker);
@@ -234,17 +217,20 @@ multicore_fifo_push_blocking((uintptr_t)&sign_data);
 
 /* Core0 expands matrix */
 polyvec_matrix_expand(mat, rho);
+check_stack_usage_core0();
 
 /* Wait for core1 */
 multicore_fifo_pop_blocking();
 multicore_reset_core1();
+check_stack_usage_core0();
 
 /* Zeroize packet */
 secure_zeroize((void *)&sign_data, sizeof(sign_data));
 
 
 rej:
-  /* Sample intermediate vector y */
+  check_stack_usage_core0();
+/* Sample intermediate vector y */
   polyvecl_uniform_gamma1(&y, rhoprime, nonce++);
 
   /* Matrix-vector multiplication */
@@ -253,11 +239,13 @@ rej:
   polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
   polyveck_reduce(&w1);
   polyveck_invntt_tomont(&w1);
+  check_stack_usage_core0();
 
   /* Decompose w and call the random oracle */
   polyveck_caddq(&w1);
   polyveck_decompose(&w1, &w0, &w1);
   polyveck_pack_w1(sig, &w1);
+  check_stack_usage_core0();
 
   shake256_init(&state);
   shake256_absorb(&state, mu, CRHBYTES);
@@ -266,12 +254,15 @@ rej:
   shake256_squeeze(sig, CTILDEBYTES, &state);
   poly_challenge(&cp, sig);
   poly_ntt(&cp);
+  check_stack_usage_core0();
 
   /* Compute z, reject if it reveals secret */
   polyvecl_pointwise_poly_montgomery(&z, &cp, &s1);
   polyvecl_invntt_tomont(&z);
   polyvecl_add(&z, &z, &y);
   polyvecl_reduce(&z);
+  check_stack_usage_core0();
+
   if(polyvecl_chknorm(&z, GAMMA1 - BETA))
     goto rej;
 
@@ -281,6 +272,8 @@ rej:
   polyveck_invntt_tomont(&h);
   polyveck_sub(&w0, &w0, &h);
   polyveck_reduce(&w0);
+  check_stack_usage_core0();
+
   if(polyveck_chknorm(&w0, GAMMA2 - BETA))
     goto rej;
 
@@ -288,6 +281,8 @@ rej:
   polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
   polyveck_invntt_tomont(&h);
   polyveck_reduce(&h);
+  check_stack_usage_core0();
+
   if(polyveck_chknorm(&h, GAMMA2))
     goto rej;
 
@@ -299,6 +294,8 @@ rej:
   /* Write signature */
   pack_sig(sig, sig, &z, &h);
   *siglen = CRYPTO_BYTES;
+  check_stack_usage_core0();
+
   return 0;
 }
 
@@ -406,14 +403,12 @@ void core1_ntt_worker(void)
   
   // Perform all NTT operations
   poly_challenge(data->cp, data->c);
-  T0 = time_us_64();
   polyvecl_ntt(data->z);
-  T1 = time_us_64();
-  ver_prof.ntt += (T1-T0);
-  
   poly_ntt(data->cp);
   polyveck_shiftl(data->t1);
   polyveck_ntt(data->t1);
+  check_stack_usage_core1();
+
   
   // Signal completion
   multicore_fifo_push_blocking(1);
@@ -464,6 +459,7 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   
   if(polyvecl_chknorm(&z, GAMMA1 - BETA)) 
     return -1; 
+  check_stack_usage_core0();
   
   // Launch core1 worker for NTT operations
   multicore_launch_core1(core1_ntt_worker);
@@ -478,10 +474,8 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   multicore_fifo_push_blocking((uintptr_t)&ntt_data);
   
   /* Core 0: Matrix expansion (expensive!) */
-  T0 = time_us_64();
   polyvec_matrix_expand(mat, rho);
-  T1 = time_us_64();
-  ver_prof.matrix_expand += (T1-T0);
+  check_stack_usage_core0();
   
   /* Core 0: Compute CRH(H(rho, t1), pre, msg) while core1 works */
   shake256(mu, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES); 
@@ -491,38 +485,29 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   shake256_absorb(&state, m, mlen); 
   shake256_finalize(&state); 
   shake256_squeeze(mu, CRHBYTES, &state);
+  check_stack_usage_core0();
   
   // Wait for core1 to finish NTT operations
   multicore_fifo_pop_blocking();
   multicore_reset_core1();
+  check_stack_usage_core0();
   
   // Zeroise core1 work packet
   secure_zeroize((void *)&ntt_data, sizeof(ntt_data));
   
   /* Continue with pointwise operations (sequential) */
-  T0 = time_us_64();
   polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
-  T1 = time_us_64();
-  ver_prof.matmul += (T1-T0);
-  poly_ntt(&cp);
-  T0 = time_us_64();
   polyveck_pointwise_poly_montgomery(&t1, &cp, &t1);
-  T1 = time_us_64();
-  ver_prof.matmul += (T1-T0);
   polyveck_sub(&w1, &w1, &t1);
   polyveck_reduce(&w1);
   polyveck_invntt_tomont(&w1);
+  check_stack_usage_core0();
   
   /* Reconstruct w1 */ 
   polyveck_caddq(&w1); 
-  T0 = time_us_64();
-  polyveck_use_hint(&w1, &w1, &h);
-  T1 = time_us_64();
-  ver_prof.use_hint += (T1-T0);
-  T0 = time_us_64();
-  polyveck_pack_w1(buf, &w1);
-  T1 = time_us_64();
-  ver_prof.pack_w1 += (T1-T0); 
+  polyveck_use_hint(&w1, &w1, &h); 
+  polyveck_pack_w1(buf, &w1); 
+  check_stack_usage_core0();
   
   /* Call random oracle and verify challenge */ 
   shake256_init(&state); 
@@ -530,6 +515,7 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   shake256_absorb(&state, buf, K*POLYW1_PACKEDBYTES); 
   shake256_finalize(&state); 
   shake256_squeeze(c2, CTILDEBYTES, &state); 
+  check_stack_usage_core0();
   
   for(i = 0; i < CTILDEBYTES; ++i) 
     if(c[i] != c2[i]) 

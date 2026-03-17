@@ -7,6 +7,7 @@
 #include "randombytes.h"
 #include "symmetric.h"
 #include "fips202.h"
+#include "mem_profile.h"
 
 /*************************************************
 * Name:        crypto_sign_keypair
@@ -39,10 +40,11 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
 
   /* Expand matrix */
   polyvec_matrix_expand(mat, rho);
-
+  check_stack_usage_core0();
   /* Sample short vectors s1 and s2 */
   polyvecl_uniform_eta(&s1, rhoprime, 0);
   polyveck_uniform_eta(&s2, rhoprime, L);
+  check_stack_usage_core0();
 
   /* Matrix-vector multiplication */
   s1hat = s1;
@@ -50,6 +52,7 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
   polyvec_matrix_pointwise_montgomery(&t1, mat, &s1hat);
   polyveck_reduce(&t1);
   polyveck_invntt_tomont(&t1);
+  check_stack_usage_core0();
 
   /* Add error vector s2 */
   polyveck_add(&t1, &t1, &s2);
@@ -58,10 +61,12 @@ int crypto_sign_keypair(uint8_t *pk, uint8_t *sk) {
   polyveck_caddq(&t1);
   polyveck_power2round(&t1, &t0, &t1);
   pack_pk(pk, rho, &t1);
+  check_stack_usage_core0();
 
   /* Compute H(rho, t1) and write secret key */
   shake256(tr, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES);
   pack_sk(sk, rho, tr, key, &t0, &s1, &s2);
+  check_stack_usage_core0();
 
   return 0;
 }
@@ -105,7 +110,9 @@ int crypto_sign_signature_internal(uint8_t *sig,
   key = tr + TRBYTES;
   mu = key + SEEDBYTES;
   rhoprime = mu + CRHBYTES;
+  check_stack_usage_core0();
   unpack_sk(rho, tr, key, &t0, &s1, &s2, sk);
+  check_stack_usage_core0();
 
   /* Compute mu = CRH(tr, pre, msg) */
   shake256_init(&state);
@@ -114,6 +121,7 @@ int crypto_sign_signature_internal(uint8_t *sig,
   shake256_absorb(&state, m, mlen);
   shake256_finalize(&state);
   shake256_squeeze(mu, CRHBYTES, &state);
+  check_stack_usage_core0();
 
   /* Compute rhoprime = CRH(key, rnd, mu) */
   shake256_init(&state);
@@ -122,16 +130,22 @@ int crypto_sign_signature_internal(uint8_t *sig,
   shake256_absorb(&state, mu, CRHBYTES);
   shake256_finalize(&state);
   shake256_squeeze(rhoprime, CRHBYTES, &state);
+  check_stack_usage_core0();
 
   /* Expand matrix and transform vectors */
   polyvec_matrix_expand(mat, rho);
+  check_stack_usage_core0();
+
   polyvecl_ntt(&s1);
   polyveck_ntt(&s2);
   polyveck_ntt(&t0);
+  check_stack_usage_core0();
 
 rej:
-  /* Sample intermediate vector y */
+  check_stack_usage_core0();
+/* Sample intermediate vector y */
   polyvecl_uniform_gamma1(&y, rhoprime, nonce++);
+  check_stack_usage_core0();
 
   /* Matrix-vector multiplication */
   z = y;
@@ -139,11 +153,13 @@ rej:
   polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
   polyveck_reduce(&w1);
   polyveck_invntt_tomont(&w1);
+  check_stack_usage_core0();
 
   /* Decompose w and call the random oracle */
   polyveck_caddq(&w1);
   polyveck_decompose(&w1, &w0, &w1);
   polyveck_pack_w1(sig, &w1);
+  check_stack_usage_core0();
 
   shake256_init(&state);
   shake256_absorb(&state, mu, CRHBYTES);
@@ -152,12 +168,15 @@ rej:
   shake256_squeeze(sig, CTILDEBYTES, &state);
   poly_challenge(&cp, sig);
   poly_ntt(&cp);
+  check_stack_usage_core0();
 
   /* Compute z, reject if it reveals secret */
   polyvecl_pointwise_poly_montgomery(&z, &cp, &s1);
   polyvecl_invntt_tomont(&z);
   polyvecl_add(&z, &z, &y);
   polyvecl_reduce(&z);
+  check_stack_usage_core0();
+
   if(polyvecl_chknorm(&z, GAMMA1 - BETA))
     goto rej;
 
@@ -167,6 +186,8 @@ rej:
   polyveck_invntt_tomont(&h);
   polyveck_sub(&w0, &w0, &h);
   polyveck_reduce(&w0);
+  check_stack_usage_core0();
+
   if(polyveck_chknorm(&w0, GAMMA2 - BETA))
     goto rej;
 
@@ -174,10 +195,14 @@ rej:
   polyveck_pointwise_poly_montgomery(&h, &cp, &t0);
   polyveck_invntt_tomont(&h);
   polyveck_reduce(&h);
+  check_stack_usage_core0();
+
   if(polyveck_chknorm(&h, GAMMA2))
     goto rej;
 
   polyveck_add(&w0, &w0, &h);
+  check_stack_usage_core0();
+
   n = polyveck_make_hint(&h, &w0, &w1);
   if(n > OMEGA)
     goto rej;
@@ -185,6 +210,8 @@ rej:
   /* Write signature */
   pack_sig(sig, sig, &z, &h);
   *siglen = CRYPTO_BYTES;
+  check_stack_usage_core0();
+
   return 0;
 }
 
@@ -313,6 +340,7 @@ int crypto_sign_verify_internal(const uint8_t *sig,
     return -1;
   if(polyvecl_chknorm(&z, GAMMA1 - BETA))
     return -1;
+  check_stack_usage_core0();
 
   /* Compute CRH(H(rho, t1), pre, msg) */
   shake256(mu, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES);
@@ -322,27 +350,33 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   shake256_absorb(&state, m, mlen);
   shake256_finalize(&state);
   shake256_squeeze(mu, CRHBYTES, &state);
+  check_stack_usage_core0();
 
   /* Matrix-vector multiplication; compute Az - c2^dt1 */
   poly_challenge(&cp, c);
   polyvec_matrix_expand(mat, rho);
+  check_stack_usage_core0();
 
   polyvecl_ntt(&z);
   polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
+  check_stack_usage_core0();
 
   poly_ntt(&cp);
   polyveck_shiftl(&t1);
   polyveck_ntt(&t1);
   polyveck_pointwise_poly_montgomery(&t1, &cp, &t1);
+  check_stack_usage_core0();
 
   polyveck_sub(&w1, &w1, &t1);
   polyveck_reduce(&w1);
   polyveck_invntt_tomont(&w1);
+  check_stack_usage_core0();
 
   /* Reconstruct w1 */
   polyveck_caddq(&w1);
   polyveck_use_hint(&w1, &w1, &h);
   polyveck_pack_w1(buf, &w1);
+  check_stack_usage_core0();
 
   /* Call random oracle and verify challenge */
   shake256_init(&state);
@@ -350,9 +384,12 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   shake256_absorb(&state, buf, K*POLYW1_PACKEDBYTES);
   shake256_finalize(&state);
   shake256_squeeze(c2, CTILDEBYTES, &state);
+  check_stack_usage_core0();
+
   for(i = 0; i < CTILDEBYTES; ++i)
     if(c[i] != c2[i])
       return -1;
+  check_stack_usage_core0();
 
   return 0;
 }

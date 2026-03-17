@@ -358,33 +358,28 @@ int crypto_sign(uint8_t *sm,
 }
 
 /*
- * Data passed to core1 for Dilithium verification
+ * Data passed to core1 for Dilithium verification - NTT operations
  */
 typedef struct {
   polyvecl *z;
   poly *cp;
   polyveck *t1;
   const uint8_t *c;
-  const uint8_t *rho;
-} core1_verify_data_t;
+} core1_ntt_data_t;
 
 /*
- * Core1 worker: NTT transformations for verification
+ * Core1 worker: NTT transformations
  */
-void core1_verify_worker(void)
+void core1_ntt_worker(void)
 {
   // Wait for work from core0
-  core1_verify_data_t *data =
-      (core1_verify_data_t *)multicore_fifo_pop_blocking();
+  core1_ntt_data_t *data =
+      (core1_ntt_data_t *)multicore_fifo_pop_blocking();
   
-  // Perform NTT on z vector
-  polyvecl_ntt(data->z);
-  
-  // Perform challenge polynomial operations
+  // Perform all NTT operations
   poly_challenge(data->cp, data->c);
+  polyvecl_ntt(data->z);
   poly_ntt(data->cp);
-  
-  // Prepare t1
   polyveck_shiftl(data->t1);
   polyveck_ntt(data->t1);
   
@@ -395,7 +390,9 @@ void core1_verify_worker(void)
 /************************************************* 
  * Name: crypto_sign_verify_internal 
  * 
- * Description: Verifies signature. Internal API with dual-core optimization.
+ * Description: Verifies signature with Option 2 parallelization.
+ *              Core 0: Matrix expansion + message hashing
+ *              Core 1: NTT operations
  * 
  * Arguments: - const uint8_t *sig: pointer to input signature 
  *            - size_t siglen: length of signature 
@@ -436,45 +433,43 @@ int crypto_sign_verify_internal(const uint8_t *sig,
   if(polyvecl_chknorm(&z, GAMMA1 - BETA)) 
     return -1; 
   
-  /* Compute CRH(H(rho, t1), pre, msg) */ 
+  // Launch core1 worker for NTT operations
+  multicore_launch_core1(core1_ntt_worker);
+  
+  static volatile core1_ntt_data_t ntt_data;
+  ntt_data.z = &z;
+  ntt_data.cp = &cp;
+  ntt_data.t1 = &t1;
+  ntt_data.c = c;
+  
+  // Send job to core1 (NTT operations)
+  multicore_fifo_push_blocking((uintptr_t)&ntt_data);
+  
+  /* Core 0: Matrix expansion (expensive!) */
+  polyvec_matrix_expand(mat, rho);
+  
+  /* Core 0: Compute CRH(H(rho, t1), pre, msg) while core1 works */
   shake256(mu, TRBYTES, pk, CRYPTO_PUBLICKEYBYTES); 
   shake256_init(&state); 
   shake256_absorb(&state, mu, TRBYTES); 
   shake256_absorb(&state, pre, prelen); 
   shake256_absorb(&state, m, mlen); 
   shake256_finalize(&state); 
-  shake256_squeeze(mu, CRHBYTES, &state); 
-  
-  // Launch core1 worker
-  multicore_launch_core1(core1_verify_worker);
-  
-  static volatile core1_verify_data_t verify_data;
-  verify_data.z = &z;
-  verify_data.cp = &cp;
-  verify_data.t1 = &t1;
-  verify_data.c = c;
-  verify_data.rho = rho;
-  
-  // Send job to core1 (NTT operations)
-  multicore_fifo_push_blocking((uintptr_t)&verify_data);
-  
-  // Core0 expands matrix in parallel
-  polyvec_matrix_expand(mat, rho);
+  shake256_squeeze(mu, CRHBYTES, &state);
   
   // Wait for core1 to finish NTT operations
   multicore_fifo_pop_blocking();
   multicore_reset_core1();
   
   // Zeroise core1 work packet
-  secure_zeroize((void *)&verify_data, sizeof(verify_data));
+  secure_zeroize((void *)&ntt_data, sizeof(ntt_data));
   
-  /* Matrix-vector multiplication; compute Az - c2^dt1 */ 
-  polyvec_matrix_pointwise_montgomery(&w1, mat, &z); 
-  
-  polyveck_pointwise_poly_montgomery(&t1, &cp, &t1); 
-  polyveck_sub(&w1, &w1, &t1); 
-  polyveck_reduce(&w1); 
-  polyveck_invntt_tomont(&w1); 
+  /* Continue with pointwise operations (sequential) */
+  polyvec_matrix_pointwise_montgomery(&w1, mat, &z);
+  polyveck_pointwise_poly_montgomery(&t1, &cp, &t1);
+  polyveck_sub(&w1, &w1, &t1);
+  polyveck_reduce(&w1);
+  polyveck_invntt_tomont(&w1);
   
   /* Reconstruct w1 */ 
   polyveck_caddq(&w1); 

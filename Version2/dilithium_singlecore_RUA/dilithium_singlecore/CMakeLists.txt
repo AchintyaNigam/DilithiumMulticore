@@ -53,6 +53,7 @@ set(DILITHIUM_SOURCES
     ntt.c
     reduce.c
     rounding.c
+    mem_profile.c
 )
 
     set(SYMMETRIC_SOURCES
@@ -65,8 +66,9 @@ set(DILITHIUM_SOURCES
 # ------------------------------------------------------------------
 add_executable(dilithium_singlecore
     # MainTest_PowerDraw.c
-    MainTest.c
+    # MainTest.c
     # MainTest_Separate_stdDev.c
+    MainTest_RUA.c
     ${DILITHIUM_SOURCES}
     ${SYMMETRIC_SOURCES}
     randombytes.c
@@ -81,7 +83,6 @@ target_compile_options(dilithium_singlecore PRIVATE
     -Wshadow
     -Wvla
     -Wpointer-arith
-    -fstack-usage
 )
 
 # ------------------------------------------------------------------

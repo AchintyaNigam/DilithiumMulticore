@@ -53,7 +53,7 @@ set(DILITHIUM_SOURCES
     ntt.c
     reduce.c
     rounding.c
-    profile.c
+    mem_profile.c
 )
 
     set(SYMMETRIC_SOURCES
@@ -67,7 +67,8 @@ set(DILITHIUM_SOURCES
 add_executable(dilithium_multicore
     # MainTest_Separate.c
     # MainTest_Separate_stdDev.c
-    MainTest_fgpt.c
+    # MainTest.c
+    MainTest_RUA.c
     ${DILITHIUM_SOURCES}
     ${SYMMETRIC_SOURCES}
     randombytes.c
@@ -108,6 +109,7 @@ target_link_libraries(dilithium_multicore
 
 pico_enable_stdio_usb(dilithium_multicore 1)
 pico_enable_stdio_uart(dilithium_multicore 0)
+
 
 # ------------------------------------------------------------------
 # Outputs
