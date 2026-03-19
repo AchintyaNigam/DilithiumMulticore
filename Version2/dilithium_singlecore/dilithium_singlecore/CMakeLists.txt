@@ -66,7 +66,8 @@ set(DILITHIUM_SOURCES
 add_executable(dilithium_singlecore
     # MainTest_PowerDraw.c
     # MainTest.c
-    MainTest_Separate_stdDev.c
+    # MainTest_Separate_stdDev.c
+    MainTest_poe.c
     ${DILITHIUM_SOURCES}
     ${SYMMETRIC_SOURCES}
     randombytes.c
