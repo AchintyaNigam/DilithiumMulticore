@@ -37,7 +37,6 @@ static int test_sign_timed(size_t mlen)
     uint8_t ctx[CTXLEN] = {0};
     snprintf((char *)ctx, CTXLEN, "mainTest");
 
-    uint64_t t0, t1;
 
     randombytes(m, MLEN);
 

@@ -17,10 +17,12 @@
 // Global buffers to avoid stack overflow and match KEM style
 static uint8_t pk[CRYPTO_PUBLICKEYBYTES];
 static uint8_t sk[CRYPTO_SECRETKEYBYTES];
+
 static uint8_t m[MLEN + CRYPTO_BYTES];
+static uint8_t m2[MLEN + CRYPTO_BYTES];
 static uint8_t sm[MLEN + CRYPTO_BYTES];
-static size_t smlen;
-static uint8_t ctx[CTXLEN] = "mainTest";
+
+static size_t mlen, smlen;
 
 int main(void)
 {
@@ -30,6 +32,9 @@ int main(void)
     gpio_init(SIGNAL_PIN);
     gpio_set_dir(SIGNAL_PIN, GPIO_OUT);
     gpio_put(SIGNAL_PIN, 0);
+    uint8_t ctx[CTXLEN] = {0};
+    snprintf((char *)ctx, CTXLEN, "mainTest");
+    mlen = MLEN;
 
     sleep_ms(5000);   // Time to open serial monitor
 
@@ -76,15 +81,13 @@ int main(void)
        VERIFY (OPEN) BATCH
        ========================= */
     printf("\n--- VERIFY batch start ---\n");
-    
+    // Need a valid keypair first
+    crypto_sign_keypair(pk, sk);
     // Need a valid signature to verify
     crypto_sign(sm, &smlen, m, MLEN, ctx, CTXLEN, sk);
-
     gpio_put(SIGNAL_PIN, 1);
     for (int i = 0; i < NTESTS; i++) {
-        uint8_t m_out[MLEN + CRYPTO_BYTES];
-        size_t mlen_out;
-        crypto_sign_open(m_out, &mlen_out, sm, smlen, ctx, CTXLEN, pk);
+        int ret = crypto_sign_open(m2, &mlen, sm, smlen, ctx, CTXLEN, pk);
     }
     gpio_put(SIGNAL_PIN, 0);
     printf("--- VERIFY batch end ---\n");
